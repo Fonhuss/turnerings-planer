@@ -1,0 +1,688 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Plus, Copy, Trash2, Play, ArrowRight, ChevronDown, ListOrdered, Brackets } from "lucide-react";
+import { motion } from "framer-motion";
+
+// -----------------------------
+// Datatyper
+// -----------------------------
+/**
+ * Et hold i turneringen.
+ */
+type Team = {
+  id: string;
+  name: string;
+};
+
+/**
+ * En kamp (bruges både i liga og knockout).
+ */
+type Match = {
+  id: string;
+  homeId: string;
+  awayId: string;
+  roundLabel?: string; // fx "Runde 1" eller "Semifinale"
+  leg?: number; // 1 eller 2 ved to-benede opgør
+  totalLegs?: number; // 1 eller 2
+  homeGoals?: number; // kan være undefined indtil udfyldt
+  awayGoals?: number;
+  played: boolean;
+};
+
+/**
+ * Turneringstyper
+ */
+ type TournamentType = "league" | "ladder" | "combo";
+
+/**
+ * Faser for kombi
+ */
+ type ComboPhase = "league" | "knockout";
+
+// -----------------------------
+// Hjælpefunktioner
+// -----------------------------
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+// Round-robin ("circle method"). Returnerer runder, hver runde er en liste af kampe (par af id'er)
+function generateRoundRobin(teamIds: string[]): string[][][] {
+  const ids = [...teamIds];
+  if (ids.length % 2 === 1) ids.push("_BYE_"); // bye hvis ulige antal
+  const n = ids.length;
+  const rounds: string[][][] = [];
+  const half = n / 2;
+  let arr = [...ids];
+
+  for (let r = 0; r < n - 1; r++) {
+    const round: string[][] = [];
+    for (let i = 0; i < half; i++) {
+      const home = arr[i];
+      const away = arr[n - 1 - i];
+      if (home !== "_BYE_" && away !== "_BYE_") round.push([home, away]);
+    }
+    rounds.push(round);
+    // rotation
+    arr = [arr[0], ...arr.slice(-1), ...arr.slice(1, -1)];
+  }
+  return rounds;
+}
+
+// Punktetabel for liga (3 for sejr, 1 for uafgjort, 0 for nederlag). Tiebreakers: point -> måldiff -> indbyrdes
+function computeLeagueTable(teams: Team[], matches: Match[]) {
+  const table = new Map<string, { team: Team; pts: number; gf: number; ga: number; gd: number }>();
+  teams.forEach((t) => table.set(t.id, { team: t, pts: 0, gf: 0, ga: 0, gd: 0 }));
+
+  const completed = matches.filter((m) => m.played && m.homeGoals != null && m.awayGoals != null);
+
+  // Basal points + mål
+  completed.forEach((m) => {
+    const home = table.get(m.homeId)!;
+    const away = table.get(m.awayId)!;
+    home.gf += m.homeGoals!; home.ga += m.awayGoals!; home.gd = home.gf - home.ga;
+    away.gf += m.awayGoals!; away.ga += m.homeGoals!; away.gd = away.gf - away.ga;
+    if (m.homeGoals! > m.awayGoals!) home.pts += 3;
+    else if (m.homeGoals! < m.awayGoals!) away.pts += 3;
+    else { home.pts += 1; away.pts += 1; }
+  });
+
+  const baseOrder = [...table.values()].sort((a, b) => {
+    if (b.pts !== a.pts) return b.pts - a.pts;
+    if (b.gd !== a.gd) return b.gd - a.gd;
+    if (b.gf !== a.gf) return b.gf - a.gf; // ekstra nuance: flest scorede mål
+    return a.team.name.localeCompare(b.team.name);
+  });
+
+  // Indbyrdes opgør tiebreak: for grupper af hold med samme point og gd, sorter efter indbyrdes resultater
+  const finalOrder: typeof baseOrder = [];
+  let i = 0;
+  while (i < baseOrder.length) {
+    const group = [baseOrder[i]];
+    let j = i + 1;
+    while (
+      j < baseOrder.length &&
+      baseOrder[j].pts === baseOrder[i].pts &&
+      baseOrder[j].gd === baseOrder[i].gd
+    ) {
+      group.push(baseOrder[j]);
+      j++;
+    }
+    if (group.length === 1) {
+      finalOrder.push(...group);
+    } else {
+      // Beregn mini-tabel for gruppen: kun indbyrdes kampe
+      const ids = new Set(group.map((g) => g.team.id));
+      const headToHead = new Map<string, { pts: number; gd: number; gf: number }>();
+      group.forEach((g) => headToHead.set(g.team.id, { pts: 0, gd: 0, gf: 0 }));
+
+      completed.forEach((m) => {
+        if (ids.has(m.homeId) && ids.has(m.awayId)) {
+          const hg = m.homeGoals!, ag = m.awayGoals!;
+          const H = headToHead.get(m.homeId)!;
+          const A = headToHead.get(m.awayId)!;
+          H.gf += hg; A.gf += ag; H.gd += hg - ag; A.gd += ag - hg;
+          if (hg > ag) H.pts += 3; else if (hg < ag) A.pts += 3; else { H.pts++; A.pts++; }
+        }
+      });
+
+      group.sort((a, b) => {
+        const ha = headToHead.get(a.team.id)!;
+        const hb = headToHead.get(b.team.id)!;
+        if (hb.pts !== ha.pts) return hb.pts - ha.pts;
+        if (hb.gd !== ha.gd) return hb.gd - ha.gd;
+        if (hb.gf !== ha.gf) return hb.gf - ha.gf;
+        return a.team.name.localeCompare(b.team.name);
+      });
+      finalOrder.push(...group);
+    }
+    i = j;
+  }
+  return finalOrder;
+}
+
+// Generér knockout-runder med byes til nærmeste 2^k
+function generateKnockoutInitialRounds(teamIds: string[], roundNames: string[], legsPerRound: number[]) {
+  // roundNames[0] = "Runde 1" / "Ottendedelsfinale" osv.
+  // legsPerRound[0] = 1 eller 2 osv.
+  // Seed efter rækkefølge. Tilpas byes hvis N ikke er en potens af 2.
+  const N = teamIds.length;
+  // Find nærmeste power-of-two OVER eller LIG med N
+  let pow = 1; while (pow < N) pow *= 2;
+  const byes = pow - N;
+  const seeds = [...teamIds];
+
+  // Fordel byes til de højeste seeds (de første i rækkefølgen)
+  const entrants: (string | null)[] = [];
+  let idx = 0;
+  let byeGiven = 0;
+  for (let i = 0; i < pow; i++) {
+    if (byeGiven < byes) {
+      entrants.push(null); // bye-plads
+      byeGiven++;
+    } else {
+      entrants.push(seeds[idx++]);
+    }
+  }
+
+  // Opret første runde parringer
+  const matches: Match[] = [];
+  for (let i = 0; i < pow; i += 2) {
+    const a = entrants[i];
+    const b = entrants[i + 1];
+    if (a && b) {
+      for (let leg = 1; leg <= (legsPerRound[0] ?? 1); leg++) {
+        matches.push({ id: uid(), homeId: a, awayId: b, roundLabel: roundNames[0], leg, totalLegs: legsPerRound[0] ?? 1, played: false });
+      }
+    } else if (a || b) {
+      // En af dem går videre automatisk (bye)
+      // Vi repræsenterer bye som en "skyggekamp" der ikke skal vises, men vi gemmer vinderens id i en speciel map retur
+    }
+  }
+  return { matches, pow, byes };
+}
+
+function aggregateScoreForPair(matches: Match[]): { homeId: string; awayId: string; homeTotal: number; awayTotal: number } {
+  const m0 = matches[0];
+  const homeId = m0.homeId, awayId = m0.awayId;
+  let h = 0, a = 0;
+  matches.forEach(m => { if (m.homeGoals != null && m.awayGoals != null) { h += m.homeGoals; a += m.awayGoals; } });
+  return { homeId, awayId, homeTotal: h, awayTotal: a };
+}
+
+// -----------------------------
+// UI-Komponent
+// -----------------------------
+export default function TournamentPlanner() {
+  const [type, setType] = useState<TournamentType>("league");
+  const [comboPhase, setComboPhase] = useState<ComboPhase>("league");
+
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [newTeam, setNewTeam] = useState("");
+
+  // Liga-opsætning
+  const [leagueCycles, setLeagueCycles] = useState(1); // hvor mange gange alle møder alle
+  const [leagueMatches, setLeagueMatches] = useState<Match[]>([]);
+
+  // Knockout-opsætning
+  const [roundNames, setRoundNames] = useState<string[]>(["Runde 1", "Kvartfinale", "Semifinale", "Finale"]);
+  const [legsPerRound, setLegsPerRound] = useState<number[]>([1, 1, 2, 1]);
+  const [koMatches, setKoMatches] = useState<Match[]>([]);
+  const [koStructureReady, setKoStructureReady] = useState(false);
+  const [includeConsolation, setIncludeConsolation] = useState(true);
+
+  // Resultatlog
+  const [log, setLog] = useState<string>("");
+
+  // Persistens i localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem("tourneyState-v1");
+    if (saved) {
+      try {
+        const s = JSON.parse(saved);
+        setType(s.type ?? "league");
+        setComboPhase(s.comboPhase ?? "league");
+        setTeams(s.teams ?? []);
+        setLeagueCycles(s.leagueCycles ?? 1);
+        setLeagueMatches(s.leagueMatches ?? []);
+        setRoundNames(s.roundNames ?? ["Runde 1", "Kvartfinale", "Semifinale", "Finale"]);
+        setLegsPerRound(s.legsPerRound ?? [1,1,2,1]);
+        setKoMatches(s.koMatches ?? []);
+        setKoStructureReady(s.koStructureReady ?? false);
+        setIncludeConsolation(s.includeConsolation ?? true);
+        setLog(s.log ?? "");
+      } catch {}
+    }
+  }, []);
+
+  useEffect(() => {
+    const snapshot = { type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log };
+    localStorage.setItem("tourneyState-v1", JSON.stringify(snapshot));
+  }, [type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log]);
+
+  // -----------------------------
+  // Team-håndtering
+  // -----------------------------
+  const addTeam = () => {
+    const name = newTeam.trim();
+    if (!name) return;
+    const t: Team = { id: uid(), name };
+    setTeams((prev) => [...prev, t]);
+    setNewTeam("");
+
+    // Hvis liga allerede er genereret, tilføj kampe mod nye hold
+    if (type === "league" || (type === "combo" && comboPhase === "league")) {
+      addLeagueTeamFixtures(t);
+    }
+
+    // Hvis knockout er i gang og første runde ikke er startet, indsæt i første runde; ellers lav play-in
+    if (type === "ladder" || (type === "combo" && comboPhase === "knockout")) {
+      insertTeamIntoKnockout(t);
+    }
+  };
+
+  const removeTeam = (id: string) => {
+    setTeams((prev) => prev.filter((t) => t.id !== id));
+    setLeagueMatches((prev) => prev.filter((m) => m.homeId !== id && m.awayId !== id));
+    setKoMatches((prev) => prev.filter((m) => m.homeId !== id && m.awayId !== id));
+  };
+
+  // -----------------------------
+  // Liga
+  // -----------------------------
+  const generateLeague = () => {
+    if (teams.length < 2) return;
+    const rounds = generateRoundRobin(teams.map((t) => t.id));
+    const matches: Match[] = [];
+    for (let c = 0; c < leagueCycles; c++) {
+      rounds.forEach((pairings, ri) => {
+        pairings.forEach(([h, a]) => {
+          matches.push({ id: uid(), homeId: h, awayId: a, roundLabel: `Runde ${ri + 1 + c * rounds.length}`, played: false, totalLegs: 1, leg: 1 });
+        });
+      });
+    }
+    setLeagueMatches(matches);
+  };
+
+  const addLeagueTeamFixtures = (t: Team) => {
+    if ((type === "league" || (type === "combo" && comboPhase === "league")) && leagueMatches.length > 0) {
+      const existingIds = teams.map((x) => x.id);
+      const newMatches: Match[] = [];
+      existingIds.forEach((id) => {
+        if (id === t.id) return;
+        for (let c = 0; c < leagueCycles; c++) {
+          newMatches.push({ id: uid(), homeId: t.id, awayId: id, roundLabel: `Nyt opgør`, played: false, totalLegs: 1, leg: 1 });
+        }
+      });
+      setLeagueMatches((prev) => [...prev, ...newMatches]);
+    }
+  };
+
+  const leagueTable = useMemo(() => computeLeagueTable(teams, leagueMatches), [teams, leagueMatches]);
+
+  // -----------------------------
+  // Knockout
+  // -----------------------------
+  const setupKnockout = () => {
+    if (teams.length < 2) return;
+    const { matches } = generateKnockoutInitialRounds(teams.map(t => t.id), roundNames, legsPerRound);
+    setKoMatches(matches);
+    setKoStructureReady(true);
+  };
+
+  const insertTeamIntoKnockout = (t: Team) => {
+    // Hvis ingen kampe endnu, gør intet – de bliver genereret ved setup
+    if (!koStructureReady) return;
+    // Prøv at finde en "bye" ved at se efter runde med ulige antal par (kan ikke ses direkte). Simpelt: lav play-in mod sidste seed.
+    // Find første runde label
+    const firstLabel = roundNames[0];
+    const firstRound = koMatches.filter(m => m.roundLabel === firstLabel);
+    const opponents = new Set(firstRound.flatMap(m => [m.homeId, m.awayId]));
+    const candidate = [...opponents][opponents.size - 1];
+    if (!candidate) return;
+    const playInId = uid();
+    const newPlayIn: Match = { id: playInId, homeId: t.id, awayId: candidate, roundLabel: `Play-in`, played: false, leg: 1, totalLegs: 1 };
+    setKoMatches(prev => [newPlayIn, ...prev]);
+  };
+
+  // Hjælpere til at sætte/rydde resultat
+  const setMatchScore = (id: string, homeGoals: number | undefined, awayGoals: number | undefined) => {
+    setLeagueMatches(prev => prev.map(m => m.id === id ? { ...m, homeGoals, awayGoals, played: homeGoals != null && awayGoals != null } : m));
+    setKoMatches(prev => prev.map(m => m.id === id ? { ...m, homeGoals, awayGoals, played: homeGoals != null && awayGoals != null } : m));
+  };
+  const clearMatchScore = (id: string) => setMatchScore(id, undefined, undefined);
+
+  // Byg export-log
+  useEffect(() => {
+    const lines: string[] = [];
+    const nameLookup = new Map(teams.map(t => [t.id, t.name] as const));
+    leagueMatches.filter(m => m.played).forEach(m => {
+      lines.push(`[LIGA] ${nameLookup.get(m.homeId)} ${m.homeGoals}-${m.awayGoals} ${nameLookup.get(m.awayId)} (${m.roundLabel})`);
+    });
+    koMatches.filter(m => m.played).forEach(m => {
+      const legInfo = m.totalLegs && m.totalLegs > 1 ? ` (Ben ${m.leg}/${m.totalLegs})` : "";
+      lines.push(`[KNOCKOUT] ${nameLookup.get(m.homeId)} ${m.homeGoals}-${m.awayGoals} ${nameLookup.get(m.awayId)} (${m.roundLabel}${legInfo})`);
+    });
+    setLog(lines.join("\n"));
+  }, [teams, leagueMatches, koMatches]);
+
+  const copyLog = async () => {
+    try { await navigator.clipboard.writeText(log); } catch {}
+  };
+
+  // UI helpers
+  const teamName = (id: string) => teams.find(t => t.id === id)?.name ?? "?";
+
+  // Kombi: start knockout fra liga
+  const startKnockoutFromLeague = (numQualifiers: number) => {
+    const order = leagueTable.map(r => r.team.id);
+    const qualifiers = order.slice(0, Math.min(numQualifiers, order.length));
+    const { matches } = generateKnockoutInitialRounds(qualifiers, roundNames, legsPerRound);
+    setKoMatches(matches);
+    setKoStructureReady(true);
+    setComboPhase("knockout");
+  };
+
+  return (
+    <div className="mx-auto max-w-6xl p-4 space-y-6">
+      <motion.h1 className="text-3xl font-bold tracking-tight" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
+        Turneringsplanlægger
+      </motion.h1>
+
+      <Card className="shadow-sm">
+        <CardContent className="p-4 grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label>Turneringsform</Label>
+            <Select value={type} onValueChange={(v: TournamentType) => setType(v)}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Vælg type" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="league"><div className="flex items-center gap-2"><ListOrdered size={16}/> Liga (alle mod alle)</div></SelectItem>
+                <SelectItem value="ladder"><div className="flex items-center gap-2"><Brackets size={16}/> Knockout / Ladder</div></SelectItem>
+                <SelectItem value="combo">Kombi: Liga → Knockout</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Nyt hold</Label>
+            <div className="flex gap-2">
+              <Input placeholder="Skriv holdnavn" value={newTeam} onChange={(e) => setNewTeam(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addTeam(); }} />
+              <Button onClick={addTeam}><Plus className="mr-1" size={16}/> Tilføj</Button>
+            </div>
+            <p className="text-xs text-muted-foreground">Du kan altid tilføje hold – også efter start.</p>
+          </div>
+
+          <div className="md:col-span-2">
+            <div className="flex flex-wrap gap-2">
+              {teams.map((t) => (
+                <Badge key={t.id} className="text-sm px-3 py-1 flex items-center gap-2">
+                  {t.name}
+                  <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => removeTeam(t.id)} title="Fjern hold"><Trash2 size={14}/></Button>
+                </Badge>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Opsætning pr. type */}
+      {type === "league" && (
+        <Card className="shadow-sm">
+          <CardContent className="p-4 space-y-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <Label>Antal gange alle møder alle</Label>
+                <Input type="number" min={1} value={leagueCycles} onChange={(e) => setLeagueCycles(Math.max(1, parseInt(e.target.value || '1', 10)))} className="w-40" />
+              </div>
+              <Button onClick={generateLeague}><Play className="mr-1" size={16}/> Generér kampprogram</Button>
+            </div>
+
+            <Tabs defaultValue="schedule">
+              <TabsList className="grid grid-cols-2 md:grid-cols-3">
+                <TabsTrigger value="schedule">Kampprogram</TabsTrigger>
+                <TabsTrigger value="table">Stilling</TabsTrigger>
+                <TabsTrigger value="results">Resultater</TabsTrigger>
+              </TabsList>
+              <TabsContent value="schedule" className="space-y-3">
+                {leagueMatches.length === 0 && <p className="text-sm text-muted-foreground">Ingen kampe endnu. Generér først.</p>}
+                {leagueMatches.map((m) => (
+                  <MatchRow key={m.id} m={m} teamName={teamName} setScore={setMatchScore} clearScore={clearMatchScore} />
+                ))}
+              </TabsContent>
+
+              <TabsContent value="table">
+                <LeagueTableView rows={leagueTable} />
+              </TabsContent>
+
+              <TabsContent value="results" className="space-y-3">
+                {leagueMatches.filter(m => m.played).length === 0 && <p className="text-sm text-muted-foreground">Ingen registrerede resultater endnu.</p>}
+                {leagueMatches.filter(m => m.played).map((m) => (
+                  <ResultLine key={m.id} label="LIGA" m={m} teamName={teamName} />
+                ))}
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      )}
+
+      {type === "ladder" && (
+        <Card className="shadow-sm">
+          <CardContent className="p-4 space-y-4">
+            <RoundConfig roundNames={roundNames} setRoundNames={setRoundNames} legsPerRound={legsPerRound} setLegsPerRound={setLegsPerRound} />
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={setupKnockout}><Play className="mr-1" size={16}/> Byg knockout</Button>
+            </div>
+
+            <div className="space-y-3">
+              {koMatches.length === 0 && <p className="text-sm text-muted-foreground">Ingen knockout-kampe endnu.</p>}
+              {koMatches.map((m) => (
+                <MatchRow key={m.id} m={m} teamName={teamName} setScore={setMatchScore} clearScore={clearMatchScore} />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {type === "combo" && (
+        <Card className="shadow-sm">
+          <CardContent className="p-4 space-y-6">
+            <div className="flex items-center gap-3">
+              <Badge variant="secondary">Fase: {comboPhase === 'league' ? 'Liga' : 'Knockout'}</Badge>
+              {comboPhase === 'league' && (
+                <div className="flex items-end gap-3">
+                  <div>
+                    <Label>Antal liga-cyklusser</Label>
+                    <Input type="number" min={1} value={leagueCycles} onChange={(e) => setLeagueCycles(Math.max(1, parseInt(e.target.value || '1', 10)))} className="w-40" />
+                  </div>
+                  <Button onClick={generateLeague}><Play className="mr-1" size={16}/> Generér liga</Button>
+                </div>
+              )}
+            </div>
+
+            {comboPhase === 'league' && (
+              <Tabs defaultValue="schedule">
+                <TabsList className="grid grid-cols-2 md:grid-cols-3">
+                  <TabsTrigger value="schedule">Liga-kampe</TabsTrigger>
+                  <TabsTrigger value="table">Stilling</TabsTrigger>
+                  <TabsTrigger value="advance">Gå videre</TabsTrigger>
+                </TabsList>
+                <TabsContent value="schedule" className="space-y-3">
+                  {leagueMatches.length === 0 && <p className="text-sm text-muted-foreground">Ingen kampe endnu. Generér først.</p>}
+                  {leagueMatches.map((m) => (
+                    <MatchRow key={m.id} m={m} teamName={teamName} setScore={setMatchScore} clearScore={clearMatchScore} />
+                  ))}
+                </TabsContent>
+                <TabsContent value="table">
+                  <LeagueTableView rows={leagueTable} />
+                </TabsContent>
+                <TabsContent value="advance" className="space-y-4">
+                  <RoundConfig roundNames={roundNames} setRoundNames={setRoundNames} legsPerRound={legsPerRound} setLegsPerRound={setLegsPerRound} />
+                  <AdvanceFromLeague leagueTable={leagueTable} onAdvance={(n) => startKnockoutFromLeague(n)} />
+                </TabsContent>
+              </Tabs>
+            )}
+
+            {comboPhase === 'knockout' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Switch id="consol" checked={includeConsolation} onCheckedChange={setIncludeConsolation} />
+                    <Label htmlFor="consol">Med "taber"-kampe (placeringskampe)</Label>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {koMatches.length === 0 && <p className="text-sm text-muted-foreground">Ingen knockout-kampe endnu.</p>}
+                  {koMatches.map((m) => (
+                    <MatchRow key={m.id} m={m} teamName={teamName} setScore={setMatchScore} clearScore={clearMatchScore} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Resultatlog */}
+      <Card className="shadow-sm">
+        <CardContent className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Resultat-log</h2>
+            <Button variant="secondary" onClick={copyLog}><Copy className="mr-1" size={16}/> Kopiér</Button>
+          </div>
+          <Textarea className="h-40" value={log} readOnly />
+          <p className="text-xs text-muted-foreground">Kopiér og indsæt i andre noter/dokumenter.</p>
+        </CardContent>
+      </Card>
+
+      <footer className="text-xs text-muted-foreground pb-6">
+        Bygget som single-file webapp. Alt gemmes lokalt i din browser.
+      </footer>
+    </div>
+  );
+}
+
+// -----------------------------
+// Underkomponenter
+// -----------------------------
+function MatchRow({ m, teamName, setScore, clearScore }: { m: Match; teamName: (id: string) => string; setScore: (id: string, hg?: number, ag?: number) => void; clearScore: (id: string) => void; }) {
+  const [hg, setHg] = useState<string>(m.homeGoals != null ? String(m.homeGoals) : "");
+  const [ag, setAg] = useState<string>(m.awayGoals != null ? String(m.awayGoals) : "");
+
+  useEffect(() => {
+    setHg(m.homeGoals != null ? String(m.homeGoals) : "");
+    setAg(m.awayGoals != null ? String(m.awayGoals) : "");
+  }, [m.homeGoals, m.awayGoals]);
+
+  useEffect(() => {
+    const hgNum = hg === "" ? undefined : Number(hg);
+    const agNum = ag === "" ? undefined : Number(ag);
+    if ((hgNum == null && agNum == null) || Number.isNaN(hgNum!) || Number.isNaN(agNum!)) return;
+    setScore(m.id, hgNum, agNum);
+  }, [hg, ag]);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto_auto] items-center gap-2 rounded-2xl border p-3">
+      <div className="flex items-center gap-2">
+        <Badge variant="outline">{m.roundLabel ?? "Kamp"}{m.totalLegs && m.totalLegs > 1 ? ` • Ben ${m.leg}/${m.totalLegs}` : ""}</Badge>
+        <div className="font-medium">{teamName(m.homeId)} <span className="text-muted-foreground">vs</span> {teamName(m.awayId)}</div>
+      </div>
+      <div className="flex items-center gap-2">
+        <Input inputMode="numeric" pattern="[0-9]*" value={hg} onChange={(e) => setHg(e.target.value)} placeholder="H" className="w-16 text-center" />
+        <span className="px-1">-</span>
+        <Input inputMode="numeric" pattern="[0-9]*" value={ag} onChange={(e) => setAg(e.target.value)} placeholder="U" className="w-16 text-center" />
+      </div>
+      <div className="justify-self-end flex gap-2">
+        <Button variant="outline" onClick={() => { setHg(""); setAg(""); clearScore(m.id); }}>Nulstil</Button>
+      </div>
+    </div>
+  );
+}
+
+function LeagueTableView({ rows }: { rows: { team: Team; pts: number; gf: number; ga: number; gd: number }[] }) {
+  return (
+    <div className="overflow-x-auto rounded-xl border">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/50">
+          <tr>
+            <th className="text-left p-2">#</th>
+            <th className="text-left p-2">Hold</th>
+            <th className="text-right p-2">Point</th>
+            <th className="text-right p-2">Mål</th>
+            <th className="text-right p-2">Diff</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.team.id} className="border-t">
+              <td className="p-2">{i + 1}</td>
+              <td className="p-2 font-medium">{r.team.name}</td>
+              <td className="p-2 text-right">{r.pts}</td>
+              <td className="p-2 text-right">{r.gf}-{r.ga}</td>
+              <td className="p-2 text-right">{r.gd}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ResultLine({ label, m, teamName }: { label: string; m: Match; teamName: (id: string) => string }) {
+  return (
+    <div className="flex items-center justify-between rounded-xl border p-3">
+      <div className="text-sm text-muted-foreground">[{label}]</div>
+      <div className="font-medium">{teamName(m.homeId)} {m.homeGoals}-{m.awayGoals} {teamName(m.awayId)}</div>
+      <div className="text-sm text-muted-foreground">{m.roundLabel}{m.totalLegs && m.totalLegs > 1 ? ` • Ben ${m.leg}/${m.totalLegs}` : ""}</div>
+    </div>
+  );
+}
+
+function RoundConfig({ roundNames, setRoundNames, legsPerRound, setLegsPerRound }: { roundNames: string[]; setRoundNames: (n: string[]) => void; legsPerRound: number[]; setLegsPerRound: (n: number[]) => void; }) {
+  const [local, setLocal] = useState(roundNames.map((name, i) => ({ name, legs: legsPerRound[i] ?? 1 })));
+
+  useEffect(() => {
+    setLocal(roundNames.map((name, i) => ({ name, legs: legsPerRound[i] ?? 1 })));
+  }, [roundNames.join("|"), legsPerRound.join("|")]);
+
+  const updateName = (i: number, val: string) => setLocal(prev => prev.map((x, idx) => idx === i ? { ...x, name: val } : x));
+  const updateLegs = (i: number, val: number) => setLocal(prev => prev.map((x, idx) => idx === i ? { ...x, legs: Math.max(1, Math.min(2, val)) } : x));
+
+  const commit = () => {
+    setRoundNames(local.map(x => x.name));
+    setLegsPerRound(local.map(x => x.legs));
+  };
+
+  const addRound = () => setLocal(prev => [...prev, { name: `Runde ${prev.length + 1}`, legs: 1 }]);
+  const removeRound = (i: number) => setLocal(prev => prev.filter((_, idx) => idx !== i));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h3 className="font-semibold">Opsæt runder (ben per runde)</h3>
+        <Button variant="outline" size="sm" onClick={addRound}><Plus size={14} className="mr-1"/>Tilføj runde</Button>
+        <Button size="sm" onClick={commit}><ArrowRight size={14} className="mr-1"/>Gem opsætning</Button>
+      </div>
+      <div className="grid gap-2">
+        {local.map((r, i) => (
+          <div key={i} className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto] gap-2 items-center border rounded-xl p-3">
+            <Input value={r.name} onChange={(e) => updateName(i, e.target.value)} />
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Ben</Label>
+              <Select value={String(r.legs)} onValueChange={(v) => updateLegs(i, Number(v))}>
+                <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">1</SelectItem>
+                  <SelectItem value="2">2</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="ghost" onClick={() => removeRound(i)} className="justify-self-end"><Trash2 size={14} className="mr-1"/>Fjern</Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdvanceFromLeague({ leagueTable, onAdvance }: { leagueTable: { team: Team; pts: number; gf: number; ga: number; gd: number }[]; onAdvance: (n: number) => void; }) {
+  const [n, setN] = useState(8);
+  return (
+    <div className="space-y-3">
+      <div className="flex items-end gap-3">
+        <div>
+          <Label>Antal hold videre til knockout</Label>
+          <Input type="number" min={2} value={n} onChange={(e) => setN(Math.max(2, parseInt(e.target.value || '2', 10)))} className="w-48" />
+        </div>
+        <Button onClick={() => onAdvance(n)}><ArrowRight size={16} className="mr-1"/> Start knockout</Button>
+      </div>
+      <div className="text-sm text-muted-foreground">Seeding baseres på aktuel liga-stilling.</div>
+      <LeagueTableView rows={leagueTable} />
+    </div>
+  );
+}
