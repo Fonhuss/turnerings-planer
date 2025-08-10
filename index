@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Plus, Copy, Trash2, Play, ArrowRight, ChevronDown, ListOrdered, Brackets } from "lucide-react";
+import { Plus, Copy, Trash2, Play, ArrowRight, ListOrdered, Brackets } from "lucide-react";
 import { motion } from "framer-motion";
 
 // -----------------------------
@@ -209,6 +209,7 @@ export default function TournamentPlanner() {
   // Liga-opsætning
   const [leagueCycles, setLeagueCycles] = useState(1); // hvor mange gange alle møder alle
   const [leagueMatches, setLeagueMatches] = useState<Match[]>([]);
+  const [leagueLocked, setLeagueLocked] = useState<boolean>(false); // NEW: lås liga ved overgang til knockout
 
   // Knockout-opsætning
   const [roundNames, setRoundNames] = useState<string[]>(["Runde 1", "Kvartfinale", "Semifinale", "Finale"]);
@@ -237,14 +238,15 @@ export default function TournamentPlanner() {
         setKoStructureReady(s.koStructureReady ?? false);
         setIncludeConsolation(s.includeConsolation ?? true);
         setLog(s.log ?? "");
+        setLeagueLocked(s.leagueLocked ?? false);
       } catch {}
     }
   }, []);
 
   useEffect(() => {
-    const snapshot = { type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log };
+    const snapshot = { type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log, leagueLocked };
     localStorage.setItem("tourneyState-v1", JSON.stringify(snapshot));
-  }, [type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log]);
+  }, [type, comboPhase, teams, leagueCycles, leagueMatches, roundNames, legsPerRound, koMatches, koStructureReady, includeConsolation, log, leagueLocked]);
 
   // -----------------------------
   // Team-håndtering
@@ -360,13 +362,14 @@ export default function TournamentPlanner() {
   const teamName = (id: string) => teams.find(t => t.id === id)?.name ?? "?";
 
   // Kombi: start knockout fra liga
-  const startKnockoutFromLeague = (numQualifiers: number) => {
+  const startKnockoutFromLeague = (numQualifiers: number, lockLeague: boolean) => {
     const order = leagueTable.map(r => r.team.id);
     const qualifiers = order.slice(0, Math.min(numQualifiers, order.length));
     const { matches } = generateKnockoutInitialRounds(qualifiers, roundNames, legsPerRound);
     setKoMatches(matches);
     setKoStructureReady(true);
     setComboPhase("knockout");
+    if (lockLeague) setLeagueLocked(true);
   };
 
   return (
@@ -420,7 +423,8 @@ export default function TournamentPlanner() {
                 <Label>Antal gange alle møder alle</Label>
                 <Input type="number" min={1} value={leagueCycles} onChange={(e) => setLeagueCycles(Math.max(1, parseInt(e.target.value || '1', 10)))} className="w-40" />
               </div>
-              <Button onClick={generateLeague}><Play className="mr-1" size={16}/> Generér kampprogram</Button>
+              <Button onClick={generateLeague} disabled={leagueLocked}><Play className="mr-1" size={16}/> Generér kampprogram</Button>
+              {leagueLocked && <Badge variant="secondary">Liga låst</Badge>}
             </div>
 
             <Tabs defaultValue="schedule">
@@ -480,7 +484,8 @@ export default function TournamentPlanner() {
                     <Label>Antal liga-cyklusser</Label>
                     <Input type="number" min={1} value={leagueCycles} onChange={(e) => setLeagueCycles(Math.max(1, parseInt(e.target.value || '1', 10)))} className="w-40" />
                   </div>
-                  <Button onClick={generateLeague}><Play className="mr-1" size={16}/> Generér liga</Button>
+                  <Button onClick={generateLeague} disabled={leagueLocked}><Play className="mr-1" size={16}/> Generér liga</Button>
+                  {leagueLocked && <Badge variant="secondary">Liga låst</Badge>}
                 </div>
               )}
             </div>
@@ -503,7 +508,7 @@ export default function TournamentPlanner() {
                 </TabsContent>
                 <TabsContent value="advance" className="space-y-4">
                   <RoundConfig roundNames={roundNames} setRoundNames={setRoundNames} legsPerRound={legsPerRound} setLegsPerRound={setLegsPerRound} />
-                  <AdvanceFromLeague leagueTable={leagueTable} onAdvance={(n) => startKnockoutFromLeague(n)} />
+                  <AdvanceFromLeague leagueTable={leagueTable} onAdvance={(n, lock) => startKnockoutFromLeague(n, lock)} />
                 </TabsContent>
               </Tabs>
             )}
@@ -670,8 +675,9 @@ function RoundConfig({ roundNames, setRoundNames, legsPerRound, setLegsPerRound 
   );
 }
 
-function AdvanceFromLeague({ leagueTable, onAdvance }: { leagueTable: { team: Team; pts: number; gf: number; ga: number; gd: number }[]; onAdvance: (n: number) => void; }) {
+function AdvanceFromLeague({ leagueTable, onAdvance }: { leagueTable: { team: Team; pts: number; gf: number; ga: number; gd: number }[]; onAdvance: (n: number, lock: boolean) => void; }) {
   const [n, setN] = useState(8);
+  const [lock, setLock] = useState(true);
   return (
     <div className="space-y-3">
       <div className="flex items-end gap-3">
@@ -679,10 +685,18 @@ function AdvanceFromLeague({ leagueTable, onAdvance }: { leagueTable: { team: Te
           <Label>Antal hold videre til knockout</Label>
           <Input type="number" min={2} value={n} onChange={(e) => setN(Math.max(2, parseInt(e.target.value || '2', 10)))} className="w-48" />
         </div>
-        <Button onClick={() => onAdvance(n)}><ArrowRight size={16} className="mr-1"/> Start knockout</Button>
+        <Button onClick={() => onAdvance(n, lock)}><ArrowRight size={16} className="mr-1"/> Afslut liga og start knockout</Button>
+      </div>
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Switch id="lockleague" checked={lock} onCheckedChange={setLock} />
+        <Label htmlFor="lockleague">Lås liga-stilling ved start af knockout</Label>
       </div>
       <div className="text-sm text-muted-foreground">Seeding baseres på aktuel liga-stilling.</div>
       <LeagueTableView rows={leagueTable} />
     </div>
   );
 }
+    </div>
+  </div>
+</body>
+</html>
