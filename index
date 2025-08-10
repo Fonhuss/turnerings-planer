@@ -696,7 +696,4 @@ function AdvanceFromLeague({ leagueTable, onAdvance }: { leagueTable: { team: Te
     </div>
   );
 }
-    </div>
-  </div>
-</body>
-</html>
+
